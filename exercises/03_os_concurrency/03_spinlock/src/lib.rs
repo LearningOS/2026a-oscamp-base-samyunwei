@@ -31,32 +31,46 @@ impl<T> SpinLock<T> {
 
     /// Acquire lock, returning a mutable reference to inner data.
     ///
-    /// TODO: Use compare_exchange to spin until lock is acquired
+    /// Use compare_exchange to spin until lock is acquired:
     /// 1. In a loop, try to change locked from false to true
     /// 2. Success uses Acquire ordering, failure uses Relaxed
     /// 3. On failure call `core::hint::spin_loop()` to hint CPU
     /// 4. On success return `&mut *self.data.get()`
     ///
-    /// # Safety
-    /// Caller must ensure `unlock` is called after using the data.
+    /// Call `unlock` only after all references to the protected data are no longer used.
+    #[allow(clippy::mut_from_ref)]
     pub fn lock(&self) -> &mut T {
-        // TODO
-        todo!()
+        while self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        // SAFETY: Successful acquisition grants exclusive access until unlock.
+        unsafe { &mut *self.data.get() }
     }
 
     /// Release lock.
     ///
-    /// TODO: Set locked to false (using Release ordering)
-    pub fn unlock(&self) {
-        // TODO
-        todo!()
+    /// # Safety
+    /// The caller must hold the lock and must stop using all references to its
+    /// data before unlocking. Unlocking twice is not allowed.
+    pub unsafe fn unlock(&self) {
+        self.locked.store(false, Ordering::Release);
     }
 
     /// Try to acquire lock without spinning.
     /// Returns Some(&mut T) on success, None if lock is busy.
+    #[allow(clippy::mut_from_ref)]
     pub fn try_lock(&self) -> Option<&mut T> {
-        // TODO: Single compare_exchange attempt
-        todo!()
+        self.locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| {
+                // SAFETY: Successful acquisition grants exclusive access until unlock.
+                unsafe { &mut *self.data.get() }
+            })
     }
 }
 
@@ -72,18 +86,22 @@ mod tests {
         {
             let data = lock.lock();
             *data = 42;
-            lock.unlock();
+            // SAFETY: The data reference is no longer used.
+            unsafe { lock.unlock() };
         }
         let data = lock.lock();
         assert_eq!(*data, 42);
-        lock.unlock();
+        // SAFETY: The data reference is no longer used.
+        unsafe { lock.unlock() };
     }
 
     #[test]
     fn test_try_lock() {
         let lock = SpinLock::new(0u32);
         assert!(lock.try_lock().is_some());
-        lock.unlock();
+        assert!(lock.try_lock().is_none());
+        // SAFETY: The data reference is no longer used.
+        unsafe { lock.unlock() };
     }
 
     #[test]
@@ -97,7 +115,8 @@ mod tests {
                 for _ in 0..1000 {
                     let data = l.lock();
                     *data += 1;
-                    l.unlock();
+                    // SAFETY: The data reference is no longer used.
+                    unsafe { l.unlock() };
                 }
             }));
         }
@@ -108,7 +127,8 @@ mod tests {
 
         let data = lock.lock();
         assert_eq!(*data, 10000);
-        lock.unlock();
+        // SAFETY: The data reference is no longer used.
+        unsafe { lock.unlock() };
     }
 
     #[test]
@@ -121,7 +141,8 @@ mod tests {
             handles.push(thread::spawn(move || {
                 let data = l.lock();
                 data.push(i);
-                l.unlock();
+                // SAFETY: The data reference is no longer used.
+                unsafe { l.unlock() };
             }));
         }
 
@@ -133,6 +154,7 @@ mod tests {
         let mut sorted = data.clone();
         sorted.sort();
         assert_eq!(sorted, vec![0, 1, 2, 3, 4]);
-        lock.unlock();
+        // SAFETY: The data reference is no longer used.
+        unsafe { lock.unlock() };
     }
 }
